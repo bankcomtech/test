@@ -1,0 +1,64 @@
+name: Deploy Hello Service
+
+on:
+  workflow_dispatch:
+    inputs:
+      service:
+        description: "Service name"
+        required: true
+        default: "hello"
+      branch:
+        description: "Git branch"
+        required: true
+        default: "main"
+      environment:
+        description: "Environment (dev/staging/prod)"
+        required: true
+        default: "dev"
+      brands:
+        description: "Brand list (CSV)"
+        required: true
+        default: "brandA,brandB"
+      chartVersion:
+        description: "Helm chart version"
+        required: true
+        default: "0.1.0"
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.branch }}
+
+      - name: Setup kubectl
+        uses: azure/setup-kubectl@v4
+        with:
+          version: 'latest'
+
+      - name: Setup Helm
+        uses: azure/setup-helm@v4
+        with:
+          version: 'latest'
+
+      - name: Deploy per brand
+        run: |
+          IFS=',' read -ra BRANDS <<< "${{ github.event.inputs.brands }}"
+          for b in "${BRANDS[@]}"; do
+            echo "Deploying brand: $b"
+            helm upgrade --install $b ./charts/hello \
+              --namespace thanh-${{ github.event.inputs.environment }} \
+              -f ./charts/hello/values-${{ github.event.inputs.environment }}.yaml \
+              --set brand.name=$b \
+              --set brand.env=${{ github.event.inputs.environment }} \
+              --set brand.version=${{ github.event.inputs.chartVersion }} \
+              --set brand.commit=${GITHUB_SHA::7}
+          done
+
+      - name: Annotate release tracker
+        run: |
+          kubectl annotate deployment hello \
+            release-tracker="env=${{ github.event.inputs.environment }},brand=${{ github.event.inputs.brands }},commit=${GITHUB_SHA::7}" \
+            --overwrite
