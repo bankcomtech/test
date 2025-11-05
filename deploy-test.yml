@@ -1,0 +1,63 @@
+ workflow_dispatch:
+    inputs:
+      service:
+        description: "Service name"
+        required: true
+        default: "hello"
+      branch:
+        description: "Git branch"
+        required: true
+        default: "main"
+      environment:
+        description: "Target environment"
+        required: true
+        default: "dev"
+      build:
+        description: "Build and push image?"
+        required: true
+        default: "true"
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    env:
+      AWS_REGION: ${{ secrets.AWS_REGION }}
+      AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
+      ECR_REPO_NAME: ${{ secrets.ECR_REPO_NAME }}
+    steps:
+      - name: Checkout branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.branch }}
+      # 🧩 Login to AWS ECR
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+      # 🧩 Build + Push image
+      - name: Build and push to ECR
+        if: ${{ inputs.build == 'true' }}
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+        run: |
+          IMAGE_TAG=${{ github.sha }}
+          docker build -t $ECR_REGISTRY/$ECR_REPO_NAME:$IMAGE_TAG .
+          docker push $ECR_REGISTRY/$ECR_REPO_NAME:$IMAGE_TAG
+          echo "IMAGE_TAG=$IMAGE_TAG" >> $GITHUB_ENV
+      # 🧩 Deploy bằng Helm chart
+      - name: Deploy via Helm
+        run: |
+          while IFS=',' read id brand domain; do
+            [ "$brand" = "brand" ] && continue
+            helm upgrade --install hello-$brand charts/hello \
+              -n ${{ inputs.environment }} \
+              --set image.repository=${{ steps.login-ecr.outputs.registry }}/${{ secrets.ECR_REPO_NAME }} \
+              --set image.tag=${{ env.IMAGE_TAG }} \
+              --set brand=$brand \
+              --set env=${{ inputs.environment }} \
+              --set commit=${{ github.sha }}
+          done < brands.csv
