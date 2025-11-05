@@ -1,4 +1,7 @@
- workflow_dispatch:
+name: Manual Deploy
+
+on:
+  workflow_dispatch:
     inputs:
       service:
         description: "Service name"
@@ -12,10 +15,19 @@
         description: "Target environment"
         required: true
         default: "dev"
+      brands:
+        description: "CSV file with brand list"
+        required: true
+        default: "brands.csv"
+      chartVersion:
+        description: "Helm chart version"
+        required: true
+        default: "1.0.0"
       build:
         description: "Build and push image?"
         required: true
         default: "true"
+
 jobs:
   deploy:
     runs-on: ubuntu-latest
@@ -23,21 +35,27 @@ jobs:
       AWS_REGION: ${{ secrets.AWS_REGION }}
       AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
       ECR_REPO_NAME: ${{ secrets.ECR_REPO_NAME }}
+      SERVICE: ${{ inputs.service }}
+      ENVIRONMENT: ${{ inputs.environment }}
+
     steps:
       - name: Checkout branch
         uses: actions/checkout@v4
         with:
           ref: ${{ inputs.branch }}
-      # 🧩 Login to AWS ECR
+
+      # 🧩 AWS ECR Login
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ secrets.AWS_REGION }}
+
       - name: Login to Amazon ECR
         id: login-ecr
         uses: aws-actions/amazon-ecr-login@v2
+
       # 🧩 Build + Push image
       - name: Build and push to ECR
         if: ${{ inputs.build == 'true' }}
@@ -48,16 +66,44 @@ jobs:
           docker build -t $ECR_REGISTRY/$ECR_REPO_NAME:$IMAGE_TAG .
           docker push $ECR_REGISTRY/$ECR_REPO_NAME:$IMAGE_TAG
           echo "IMAGE_TAG=$IMAGE_TAG" >> $GITHUB_ENV
-      # 🧩 Deploy bằng Helm chart
-      - name: Deploy via Helm
+
+      # 🧩 Deploy bằng Helm
+      - name: Deploy per brand via Helm
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          IMAGE_TAG: ${{ env.IMAGE_TAG }}
         run: |
+          echo "🚀 Starting deploy for service: ${SERVICE}"
           while IFS=',' read id brand domain; do
             [ "$brand" = "brand" ] && continue
-            helm upgrade --install hello-$brand charts/hello \
-              -n ${{ inputs.environment }} \
-              --set image.repository=${{ steps.login-ecr.outputs.registry }}/${{ secrets.ECR_REPO_NAME }} \
-              --set image.tag=${{ env.IMAGE_TAG }} \
-              --set brand=$brand \
-              --set env=${{ inputs.environment }} \
-              --set commit=${{ github.sha }}
-          done < brands.csv
+            echo "📦 Deploying brand: $brand"
+
+            helm upgrade --install ${SERVICE}-${brand} charts/${SERVICE} \
+              -n ${ENVIRONMENT} \
+              --set image.repository=${ECR_REGISTRY}/${ECR_REPO_NAME} \
+              --set image.tag=${IMAGE_TAG} \
+              --set brand=${brand} \
+              --set env=${ENVIRONMENT} \
+              --set commit=${GITHUB_SHA} \
+              --version ${{ inputs.chartVersion }}
+
+            # 🔖 Ghi nhận trạng thái vào ConfigMap "release-tracker"
+            kubectl patch configmap release-tracker -n ${ENVIRONMENT} \
+              --type merge \
+              -p "{\"data\": {\"${SERVICE}-${brand}\": \"${IMAGE_TAG} (${GITHUB_SHA}) chart:${{ inputs.chartVersion }}\"}}"
+
+          done < ${{ inputs.brands }}
+
+      # 🧩 Liệt kê các phiên bản hiện tại (so sánh commit)
+      - name: Check outdated releases
+        run: |
+          echo "🧾 Current deployed versions:"
+          kubectl get configmap release-tracker -n ${ENVIRONMENT} -o jsonpath='{.data}' | jq .
+
+          echo "🔍 Checking outdated brands..."
+          for k in $(kubectl get configmap release-tracker -n ${ENVIRONMENT} -o jsonpath='{.data}' | jq -r 'keys[]'); do
+            val=$(kubectl get configmap release-tracker -n ${ENVIRONMENT} -o jsonpath="{.data.${k}}" )
+            if [[ $val != *"${GITHUB_SHA}"* ]]; then
+              echo "⚠️ Brand $k is outdated → $val"
+            fi
+          done
