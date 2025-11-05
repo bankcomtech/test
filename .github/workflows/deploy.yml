@@ -1,0 +1,29 @@
+name: Manual Deploy
+
+on:
+  workflow_dispatch:
+    inputs:
+      service:
+        description: "Service name"
+        required: true
+        default: "hello"
+      branch:
+        description: "Git branch"
+        required: true
+        default: "main"
+      environment:
+        description: "Target environment"
+        required: true
+        default: "dev"
+      brands:
+        description: "CSV file with brand list"
+        required: true
+        default: "brands.csv"
+      chartVersion:
+        description: "Helm chart version"
+        required: true
+        default: "1.0.0"
+      build:
+        description: "Build and push image?"
+        required: true
+        default: "true"
