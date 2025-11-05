@@ -39,12 +39,13 @@ jobs:
       ENVIRONMENT: ${{ inputs.environment }}
 
     steps:
+      # 🧩 Checkout code
       - name: Checkout branch
         uses: actions/checkout@v4
         with:
           ref: ${{ inputs.branch }}
 
-      # 🧩 AWS ECR Login
+      # 🧩 AWS auth
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
@@ -56,7 +57,14 @@ jobs:
         id: login-ecr
         uses: aws-actions/amazon-ecr-login@v2
 
-      # 🧩 Build + Push image
+      # 🧩 Setup kubeconfig (EKS)
+      - name: Setup kubeconfig
+        run: |
+          aws eks update-kubeconfig \
+            --region $AWS_REGION \
+            --name ${{ secrets.EKS_CLUSTER_NAME }}
+
+      # 🧩 Build + Push image (optional)
       - name: Build and push to ECR
         if: ${{ inputs.build == 'true' }}
         env:
@@ -67,13 +75,18 @@ jobs:
           docker push $ECR_REGISTRY/$ECR_REPO_NAME:$IMAGE_TAG
           echo "IMAGE_TAG=$IMAGE_TAG" >> $GITHUB_ENV
 
-      # 🧩 Deploy bằng Helm
+      # 🧩 Deploy with Helm + track version
       - name: Deploy per brand via Helm
         env:
           ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
           IMAGE_TAG: ${{ env.IMAGE_TAG }}
         run: |
           echo "🚀 Starting deploy for service: ${SERVICE}"
+
+          # Ensure ConfigMap exists
+          kubectl get configmap release-tracker -n ${ENVIRONMENT} >/dev/null 2>&1 || \
+            kubectl create configmap release-tracker -n ${ENVIRONMENT} --from-literal=init="true"
+
           while IFS=',' read id brand domain; do
             [ "$brand" = "brand" ] && continue
             echo "📦 Deploying brand: $brand"
@@ -87,14 +100,14 @@ jobs:
               --set commit=${GITHUB_SHA} \
               --version ${{ inputs.chartVersion }}
 
-            # 🔖 Ghi nhận trạng thái vào ConfigMap "release-tracker"
+            # 🔖 Update release-tracker safely
             kubectl patch configmap release-tracker -n ${ENVIRONMENT} \
               --type merge \
-              -p "{\"data\": {\"${SERVICE}-${brand}\": \"${IMAGE_TAG} (${GITHUB_SHA}) chart:${{ inputs.chartVersion }}\"}}"
+              -p "{\"data\": {\"${SERVICE}-${brand}\": \"tag:${IMAGE_TAG}, commit:${GITHUB_SHA}, chart:${{ inputs.chartVersion }}\"}}"
 
           done < ${{ inputs.brands }}
 
-      # 🧩 Liệt kê các phiên bản hiện tại (so sánh commit)
+      # 🧩 Show release status
       - name: Check outdated releases
         run: |
           echo "🧾 Current deployed versions:"
